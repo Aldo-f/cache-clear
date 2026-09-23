@@ -6,7 +6,8 @@
 #       rebuild caches. Includes a safe swap dance on low-memory systems
 #       to prevent OOM when purging large caches.
 #
-# Install:  curl -sL https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear | bash
+# Install:  curl -sL https://cdn.jsdelivr.net/gh/Aldo-f/cache-clear@main/cache-clear | bash
+#    (or:   curl -sL https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear | bash)
 # Usage:    cache-clear [--dry-run|--force|--uninstall|--help]
 #
 # When run as root, system-level caches are also cleaned.
@@ -327,9 +328,9 @@ self_install() {
         # the script from stdin if we capture it early, or simply download
         # from GitHub. Use curl/wget to fetch the latest version.
         if command -v curl >/dev/null 2>&1; then
-            curl -fsSL "https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear" -o "$target"
+            curl -fsSL "https://cdn.jsdelivr.net/gh/Aldo-f/cache-clear@main/cache-clear" -o "$target"
         elif command -v wget >/dev/null 2>&1; then
-            wget -qO "$target" "https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear"
+            wget -qO "$target" "https://cdn.jsdelivr.net/gh/Aldo-f/cache-clear@main/cache-clear"
         else
             echo "Error: need curl or wget to install from pipe." >&2
             return 1
