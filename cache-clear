@@ -18,6 +18,8 @@ CACHE_ROOT="${HERMES_HOME:-$HOME/.hermes}/cache"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HOME/.local/bin}"
 CMD_NAME="cache-clear"
 LOG_FILE="${CACHE_ROOT}/clean.log"
+# Root gets a system-wide symlink so sudo cache-clear works
+SYSTEM_BIN="/usr/local/bin"
 IS_ROOT=false
 [[ "${EUID:-$(id -u)}" -eq 0 ]] && IS_ROOT=true
 
@@ -337,6 +339,12 @@ self_install() {
         ln -sf "$(readlink -f "$src")" "$target"
         chmod +x "$target"
         echo "✓ Symlinked: $target → $(readlink -f "$src")"
+
+        # When running as root, also symlink to /usr/local/bin
+        if [[ "$IS_ROOT" == "true" ]] && [[ -w "$SYSTEM_BIN" ]]; then
+            ln -sf "$(readlink -f "$src")" "$SYSTEM_BIN/$CMD_NAME"
+            echo "✓ System-wide: $SYSTEM_BIN/$CMD_NAME → $(readlink -f "$src")"
+        fi
     else
         # Pipe workflow: the full script is being piped to bash right now.
         # We can't access BASH_SOURCE[0] (it's empty), but we CAN read
@@ -352,6 +360,13 @@ self_install() {
         fi
         chmod +x "$target"
         echo "✓ Installed: $target"
+
+        # When running as root, also symlink to /usr/local/bin so
+        # `sudo cache-clear` works (root's PATH doesn't include ~/.local/bin)
+        if [[ "$IS_ROOT" == "true" ]] && [[ -w "$SYSTEM_BIN" ]]; then
+            ln -sf "$target" "$SYSTEM_BIN/$CMD_NAME"
+            echo "✓ System-wide: $SYSTEM_BIN/$CMD_NAME → $target"
+        fi
     fi
 
     case ":$PATH:" in
@@ -369,21 +384,32 @@ self_install() {
 # ── Main ───────────────────────────────────────────────────────
 main() {
     local src="${BASH_SOURCE[0]:-}"
+    local ran_install=false
+
     # Self-install when piped to bash (no backing script file)
     if [[ ! -f "$src" ]]; then
         self_install
-        exit 0
+        ran_install=true
     fi
 
     case "${1:-}" in
         --install)   self_install; exit 0 ;;
-        --uninstall) rm -f "$INSTALL_DIR/$CMD_NAME"; echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"; exit 0 ;;
+        --uninstall) rm -f "$INSTALL_DIR/$CMD_NAME" "$SYSTEM_BIN/$CMD_NAME"
+                     echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"
+                     [[ "$IS_ROOT" == "true" ]] && echo "Uninstalled: $SYSTEM_BIN/$CMD_NAME"
+                     exit 0 ;;
         --help|-h)   show_help; exit 0 ;;
         --dry-run)   DRY_RUN=true ;;
         --force)     FORCE=true ;;
         "")          ;; # Interactive with default Y
         *)           echo "Unknown option: $1"; show_help; exit 1 ;;
     esac
+
+    # If we just installed via curl|bash, run the cleaner immediately
+    if [[ "$ran_install" == "true" ]]; then
+        echo ""
+        echo "=== Running cache-clear for the first time ==="
+    fi
 
     do_clean
 }
