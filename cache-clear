@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # cache-clear — safe cache cleaner for Hermes Agent
 #
-# Install:  curl -sL <url> | bash   OR   bash cache-clear.sh --install
+# Install:  curl -sL https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear | bash
 # Usage:    cache-clear [--dry-run|--force|--uninstall|--help]
 #
 # Clears stale temp data from ~/.hermes/cache while preserving
@@ -14,31 +14,14 @@ INSTALL_DIR="${HERMES_INSTALL_DIR:-$HOME/.local/bin}"
 CMD_NAME="cache-clear"
 LOG_FILE="${CACHE_ROOT}/clean.log"
 
-# --- Directories that are pure temp → safe to wipe ---
 SAFE_DIRS=(
-    scratch/terminal-output
-    scratch/node-compile-cache
-    scratch/hermes-dm-*
-    scratch/hermes_kernel_*
-    scratch/org.chromium.Chromium.*
-    scratch/agent-browser-*
-    scratch/page*.html
-    scratch/hermes-snap-*.sh
-    scratch/hermes-pty-active-*.json
-    scratch/.last_prune
-    terminal-output
-    exec
-    web
-    documents
-    delegation
-    browser-use
-    blocked-scripts
-    screenshots
-    images
-    videos
-    audio
-    vision
-    spillover
+    scratch/terminal-output scratch/node-compile-cache
+    scratch/hermes-dm-* scratch/hermes_kernel_*
+    scratch/org.chromium.Chromium.* scratch/agent-browser-*
+    scratch/page*.html scratch/hermes-snap-*.sh
+    scratch/hermes-pty-active-*.json scratch/.last_prune
+    terminal-output exec web documents delegation
+    browser-use blocked-scripts screenshots images videos audio vision spillover
 )
 
 DRY_RUN=false
@@ -53,125 +36,6 @@ log() {
 
 get_size() { du -sh "$1" 2>/dev/null | cut -f1; }
 
-# ── Self-install ───────────────────────────────────────────────
-self_install() {
-    local source_file=""
-
-    # Resolve the actual script file (follows symlink)
-    if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
-        source_file=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")
-    fi
-
-    mkdir -p "$INSTALL_DIR"
-    local target="$INSTALL_DIR/$CMD_NAME"
-
-    if [[ -n "$source_file" && -f "$source_file" ]]; then
-        # Run from file — symlink it
-        ln -sf "$source_file" "$target"
-        echo "✓ Symlinked: $target → $source_file"
-    else
-        # Piped to bash — embed the full script
-        local script
-        script='#!/usr/bin/env bash
-# cache-clear — safe cache cleaner for Hermes Agent (installed via pipe)
-set -euo pipefail
-CACHE_ROOT="${HERMES_HOME:-$HOME/.hermes}/cache"
-INSTALL_DIR="${HERMES_INSTALL_DIR:-$HOME/.local/bin}"
-CMD_NAME="cache-clear"
-LOG_FILE="${CACHE_ROOT}/clean.log"
-SAFE_DIRS=(
-    scratch/terminal-output scratch/node-compile-cache
-    scratch/hermes-dm-* scratch/hermes_kernel_*
-    scratch/org.chromium.Chromium.* scratch/agent-browser-*
-    scratch/page*.html scratch/hermes-snap-*.sh
-    scratch/hermes-pty-active-*.json scratch/.last_prune
-    terminal-output exec web documents delegation
-    browser-use blocked-scripts screenshots images videos audio vision spillover
-)
-DRY_RUN=false; FORCE=false
-log() { local msg="[ $(date '"'"'+%Y-%m-%d %H:%M:%S'"'"') ] $*"; echo "$msg"; mkdir -p "$CACHE_ROOT" 2>/dev/null || true; echo "$msg" >> "$LOG_FILE" 2>/dev/null || true; }
-get_size() { du -sh "$1" 2>/dev/null | cut -f1; }
-show_help() { cat <<EOF
-hermes-cache-clear — safe Hermes cache cleaner
-
-Usage:
-  '"$CMD_NAME"'              Interactive (preview, then confirm)
-  '"$CMD_NAME"' --dry-run    Preview only, delete nothing
-  '"$CMD_NAME"' --force      Delete without confirmation
-  '"$CMD_NAME"' --uninstall  Remove this command
-  '"$CMD_NAME"' --help       Show this help
-EOF
-}
-do_clean() {
-    mkdir -p "$CACHE_ROOT"; cd "$CACHE_ROOT"
-    local total_before; total_before=$(du -sh . 2>/dev/null | cut -f1)
-    log "=== Cache clear started ==="
-    log "Cache root: $CACHE_ROOT"
-    log "Size before: $total_before"
-    log "Mode: $([[ "$DRY_RUN" == "true" ]] && echo "DRY RUN" || echo "DELETE")"
-    local targets=()
-    for pattern in "${SAFE_DIRS[@]}"; do
-        for match in $pattern; do
-            [[ -e "$match" ]] && targets+=("$match")
-        done
-    done
-    if [[ ${#targets[@]} -eq 0 ]]; then
-        log "Nothing to clean — cache is already empty."; return 0
-    fi
-    log "Targets (${#targets[@]}):"
-    for t in "${targets[@]}"; do
-        local sz; sz=$(get_size "$t"); log "  $sz  $t"
-    done
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log "=== DRY RUN — nothing deleted ==="; return 0
-    fi
-    if [[ "$FORCE" != "true" ]]; then
-        echo ""; read -rp "Delete the above? [y/N] " answer
-        case "$answer" in
-            [yY][eE][sS]|[yY]) ;;
-            *) log "Cancelled."; return 0 ;;
-        esac
-    fi
-    for t in "${targets[@]}"; do
-        rm -rf "$t"; log "  deleted: $t"
-    done
-    find . -maxdepth 1 -name '"'"'*.tmp'"'"' -delete 2>/dev/null || true
-    local total_after; total_after=$(du -sh . 2>/dev/null | cut -f1)
-    log "Size after: $total_after"
-    log "=== Cache clear complete ==="
-    echo ""; echo "Before: $total_before  →  After: $total_after"
-}
-main() {
-    if [[ "${1:-}" == "--install" ]]; then echo "Already installed."; exit 0; fi
-    if [[ "${1:-}" == "--uninstall" ]]; then rm -f "$INSTALL_DIR/$CMD_NAME"; echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"; exit 0; fi
-    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then show_help; exit 0; fi
-    if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=true; elif [[ "${1:-}" == "--force" ]]; then FORCE=true; fi
-    do_clean
-}
-main "$@"
-'
-        printf '%s\n' "$script" > "$target"
-        chmod +x "$target"
-        echo "✓ Installed: $target"
-    fi
-
-    chmod +x "$target" 2>/dev/null || true
-
-    case ":$PATH:" in
-        *":$INSTALL_DIR:"*) ;;
-        *)
-            echo ""
-            echo "⚠ $INSTALL_DIR is not on your PATH."
-            echo "  bash:  export PATH=\"$INSTALL_DIR:\$PATH\""
-            echo "  fish:  fish_add_path $INSTALL_DIR"
-            echo ""
-            ;;
-    esac
-
-    echo "Run \`$CMD_NAME --help\` for usage."
-}
-
-# ── Help ───────────────────────────────────────────────────────
 show_help() {
     cat <<EOF
 cache-clear — safe Hermes cache cleaner
@@ -188,7 +52,6 @@ Preserves: root-level JSON caches, active sessions, clean.log
 EOF
 }
 
-# ── Clean ──────────────────────────────────────────────────────
 do_clean() {
     mkdir -p "$CACHE_ROOT"
     cd "$CACHE_ROOT"
@@ -239,7 +102,6 @@ do_clean() {
         log "  deleted: $t"
     done
 
-    # Remove stale .tmp files at root level
     find . -maxdepth 1 -name '*.tmp' -delete 2>/dev/null || true
 
     local total_after
@@ -250,10 +112,141 @@ do_clean() {
     echo "Before: $total_before  →  After: $total_after"
 }
 
+# ── Self-install when piped to bash ─────────────────────────────
+# Uses a quoted heredoc so nothing inside is expanded — the embedded
+# script is written verbatim to ~/.local/bin/cache-clear.
+self_install() {
+    mkdir -p "$INSTALL_DIR"
+    local target="$INSTALL_DIR/$CMD_NAME"
+
+    cat <<'INSTALL_SCRIPT' > "$target"
+#!/usr/bin/env bash
+# cache-clear — safe cache cleaner for Hermes Agent (installed via pipe)
+set -euo pipefail
+
+CACHE_ROOT="${HERMES_HOME:-$HOME/.hermes}/cache"
+INSTALL_DIR="${HERMES_INSTALL_DIR:-$HOME/.local/bin}"
+CMD_NAME="cache-clear"
+LOG_FILE="${CACHE_ROOT}/clean.log"
+
+SAFE_DIRS=(
+    scratch/terminal-output scratch/node-compile-cache
+    scratch/hermes-dm-* scratch/hermes_kernel_*
+    scratch/org.chromium.Chromium.* scratch/agent-browser-*
+    scratch/page*.html scratch/hermes-snap-*.sh
+    scratch/hermes-pty-active-*.json scratch/.last_prune
+    terminal-output exec web documents delegation
+    browser-use blocked-scripts screenshots images videos audio vision spillover
+)
+
+DRY_RUN=false
+FORCE=false
+
+log() {
+    local msg="[ $(date '+%Y-%m-%d %H:%M:%S') ] $*"
+    echo "$msg"
+    mkdir -p "$CACHE_ROOT" 2>/dev/null || true
+    echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
+}
+get_size() { du -sh "$1" 2>/dev/null | cut -f1; }
+
+show_help() {
+    cat <<EOF
+cache-clear — safe Hermes cache cleaner
+
+Usage:
+  $CMD_NAME              Interactive (preview, then confirm)
+  $CMD_NAME --dry-run    Preview only, delete nothing
+  $CMD_NAME --force      Delete without confirmation
+  $CMD_NAME --uninstall  Remove this command
+  $CMD_NAME --help       Show this help
+
+Clears stale temp from: $CACHE_ROOT
+Preserves: root-level JSON caches, active sessions, clean.log
+EOF
+}
+
+do_clean() {
+    mkdir -p "$CACHE_ROOT"; cd "$CACHE_ROOT"
+    local total_before; total_before=$(du -sh . 2>/dev/null | cut -f1)
+    log "=== Cache clear started ==="
+    log "Cache root: $CACHE_ROOT"
+    log "Size before: $total_before"
+    log "Mode: $([[ "$DRY_RUN" == "true" ]] && echo "DRY RUN" || echo "DELETE")"
+    local targets=()
+    for pattern in "${SAFE_DIRS[@]}"; do
+        for match in $pattern; do
+            [[ -e "$match" ]] && targets+=("$match")
+        done
+    done
+    if [[ ${#targets[@]} -eq 0 ]]; then
+        log "Nothing to clean — cache is already empty."; return 0
+    fi
+    log "Targets (${#targets[@]}):"
+    for t in "${targets[@]}"; do
+        local sz; sz=$(get_size "$t"); log "  $sz  $t"
+    done
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "=== DRY RUN — nothing deleted ==="; return 0
+    fi
+    if [[ "$FORCE" != "true" ]]; then
+        echo ""
+        read -rp "Delete the above? [y/N] " answer
+        case "$answer" in
+            [yY][eE][sS]|[yY]) ;;
+            *) log "Cancelled."; return 0 ;;
+        esac
+    fi
+    for t in "${targets[@]}"; do
+        rm -rf "$t"; log "  deleted: $t"
+    done
+    find . -maxdepth 1 -name '*.tmp' -delete 2>/dev/null || true
+    local total_after; total_after=$(du -sh . 2>/dev/null | cut -f1)
+    log "Size after: $total_after"
+    log "=== Cache clear complete ==="
+    echo ""; echo "Before: $total_before  →  After: $total_after"
+}
+
+main() {
+    if [[ "${1:-}" == "--uninstall" ]]; then
+        rm -f "$INSTALL_DIR/$CMD_NAME"
+        echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"; exit 0
+    fi
+    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        show_help; exit 0
+    fi
+    if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=true
+    elif [[ "${1:-}" == "--force" ]]; then FORCE=true
+    fi
+    do_clean
+}
+main "$@"
+INSTALL_SCRIPT
+
+    chmod +x "$target"
+    echo "✓ Installed: $target"
+
+    case ":$PATH:" in
+        *":$INSTALL_DIR:"*) ;;
+        *)
+            echo ""
+            echo "⚠ $INSTALL_DIR is not on your PATH."
+            echo "  bash:  export PATH=\"$INSTALL_DIR:\$PATH\""
+            echo "  fish:  fish_add_path $INSTALL_DIR"
+            echo ""
+            ;;
+    esac
+
+    echo "Run \`$CMD_NAME --help\` for usage."
+}
+
 # ── Main ───────────────────────────────────────────────────────
 main() {
-    # Self-install when piped to bash (stdin not a tty and no script file)
-    if [[ ! -t 0 && -z "${BASH_SOURCE[0]:-}" ]]; then
+    # Self-install when piped to bash (no backing script file).
+    # When run via `curl | bash`, BASH_SOURCE[0] is empty or doesn't
+    # point to a real file on disk.
+    local src="${BASH_SOURCE[0]:-}"
+    if [[ ! -f "$src" ]]; then
         self_install
         exit 0
     fi

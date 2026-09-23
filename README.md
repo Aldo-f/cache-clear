@@ -2,13 +2,22 @@
 
 Safe cache cleaner for Hermes Agent. Clears stale temp data from `~/.hermes/cache` while preserving expensive-to-rebuild JSON caches and active session files.
 
-## Install
+## Install (pipe)
 
 ```bash
 curl -sL https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear | bash
 ```
 
-This installs `cache-clear` to `~/.local/bin/` and makes it available on your PATH.
+Installs `cache-clear` to `~/.local/bin/` and makes it available on your PATH.
+
+## Install (clone)
+
+```bash
+git clone https://github.com/Aldo-f/cache-clear.git ~/dev/scripts/cache-clear
+bash ~/dev/scripts/cache-clear/cache-clear --install
+```
+
+The `--install` flag creates a symlink at `~/.local/bin/cache-clear` so the command works globally from any directory.
 
 ## Usage
 
