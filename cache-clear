@@ -141,6 +141,8 @@ swap_dance() {
     fi
 
     local swap_file="${swap_dir}/.cache-clear-swap"
+    # Normalize: if swap_dir is /, avoid double-slash
+    [[ "$swap_dir" == "/" ]] && swap_file="/.cache-clear-swap"
 
     log "Creating 4 GB temp swap file at $swap_file..."
     if ! as_root fallocate -l 4G "$swap_file" 2>/dev/null; then
@@ -161,6 +163,7 @@ swap_dance() {
     as_root rm -f "$swap_file"
 
     log "Swap dance complete."
+    log "Verification:"
     swapon --show 2>/dev/null | sed 's/^/  /' || true
     free -h 2>/dev/null | grep -E '^(Swap|Mem)' | sed 's/^/  /'
 }
@@ -174,6 +177,7 @@ Usage:
   cache-clear              Interactive (preview, then confirm — default Y)
   cache-clear --dry-run    Preview only, delete nothing
   cache-clear --force      Delete without confirmation
+  cache-clear --swap      Safe swap dance only (cycle zram0 to free swap memory)
   cache-clear --update    Download and install the latest version
   cache-clear --uninstall Remove this command
   cache-clear --help      Show this help
@@ -434,6 +438,7 @@ main() {
     case "${1:-}" in
         --install)   self_install; exit 0 ;;
         --update)    self_update; exit 0 ;;
+        --swap)      swap_dance $((1 << 30)); exit 0 ;;  # force >1GB threshold
         --uninstall) rm -f "$INSTALL_DIR/$CMD_NAME" "$SYSTEM_BIN/$CMD_NAME"
                      echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"
                      [[ "$IS_ROOT" == "true" ]] && echo "Uninstalled: $SYSTEM_BIN/$CMD_NAME"
