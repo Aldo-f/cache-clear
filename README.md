@@ -52,7 +52,7 @@ cache-clear --help
 | Node.js | `~/.npm`, `~/.cache/yarn` |
 | Python | `~/.cache/pip`, `~/.cache/uv` |
 | Browsers | Chromium, Firefox caches |
-| APT (sudo) | `/var/cache/apt/archives/*` |
+| APT (sudo) | `/var/cache/apt/archives/*`, `apt-get autoremove` |
 | Journal (sudo) | `/var/log/journal/*` |
 
 ## What's preserved
@@ -74,6 +74,28 @@ a **swap dance**:
 
 This prevents OOM when large caches are purged on memory-constrained
 systems like the Raspberry Pi.
+
+## Testing the swap dance
+
+A dedicated test script validates the swap dance logic without running
+a full cache clear:
+
+```bash
+# Check preconditions only
+sudo ./test-swap-dance.sh --dry-run
+
+# Run the full swap dance test
+sudo ./test-swap-dance.sh
+```
+
+The test verifies:
+- `/dev/zram0` exists
+- Root/sudo available
+- `/tmp` has enough space for a 4 GB swap file
+- Full swapon/swapoff cycle completes
+- zram0 is reactivated after the dance
+- Temp swap file is cleaned up
+- Post-dance state matches expectations
 
 ## Contributing
 
