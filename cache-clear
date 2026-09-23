@@ -215,16 +215,21 @@ do_clean() {
 }
 
 main() {
-    if [[ "${1:-}" == "--uninstall" ]]; then
-        rm -f "$INSTALL_DIR/$CMD_NAME"
-        echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"; exit 0
+    # Self-install when piped to bash (no backing script file).
+    local src="${BASH_SOURCE[0]:-}"
+    if [[ ! -f "$src" ]]; then
+        self_install
+        exit 0
     fi
-    if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-        show_help; exit 0
-    fi
-    if [[ "${1:-}" == "--dry-run" ]]; then DRY_RUN=true
-    elif [[ "${1:-}" == "--force" ]]; then FORCE=true
-    fi
+
+    case "${1:-}" in
+        --install)   self_install; exit 0 ;;
+        --uninstall) rm -f "$INSTALL_DIR/$CMD_NAME"; echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"; exit 0 ;;
+        --help|-h)  show_help; exit 0 ;;
+        --dry-run)   DRY_RUN=true ;;
+        --force)     FORCE=true ;;
+    esac
+
     do_clean
 }
 main "$@"
