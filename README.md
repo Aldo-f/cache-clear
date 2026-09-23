@@ -19,6 +19,12 @@ desktop, and server — no sudo required for normal operation.
 ## Install
 
 ```bash
+curl -sL https://cdn.jsdelivr.net/gh/Aldo-f/cache-clear@main/cache-clear | bash
+```
+
+Or via GitHub raw:
+
+```bash
 curl -sL https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear | bash
 ```
 
