@@ -174,8 +174,9 @@ Usage:
   cache-clear              Interactive (preview, then confirm — default Y)
   cache-clear --dry-run    Preview only, delete nothing
   cache-clear --force      Delete without confirmation
-  cache-clear --uninstall  Remove this command
-  cache-clear --help       Show this help
+  cache-clear --update    Download and install the latest version
+  cache-clear --uninstall Remove this command
+  cache-clear --help      Show this help
 
 Clears (user-level, no root needed):
   ~/.hermes/cache/  (all temp dirs)
@@ -381,6 +382,44 @@ self_install() {
     echo "Run \`$CMD_NAME --help\` for usage."
 }
 
+# ── Self-update ───────────────────────────────────────────────
+self_update() {
+    local target="$INSTALL_DIR/$CMD_NAME"
+    local tmp_file
+    tmp_file=$(mktemp)
+    local url="https://cdn.jsdelivr.net/gh/Aldo-f/cache-clear@main/cache-clear"
+
+    echo "Checking for updates..."
+
+    # Download latest version
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$url" -o "$tmp_file" || { echo "Error: download failed." >&2; rm -f "$tmp_file"; return 1; }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$tmp_file" "$url" || { echo "Error: download failed." >&2; rm -f "$tmp_file"; return 1; }
+    else
+        echo "Error: need curl or wget to update." >&2; rm -f "$tmp_file"; return 1
+    fi
+
+    # Compare versions (skip if identical)
+    if [[ -f "$target" ]] && cmp -s "$tmp_file" "$target"; then
+        echo "Already up to date."
+        rm -f "$tmp_file"
+        return 0
+    fi
+
+    # Install
+    mkdir -p "$INSTALL_DIR"
+    mv "$tmp_file" "$target"
+    chmod +x "$target"
+    echo "✓ Updated: $target"
+
+    # Refresh system-wide symlink when root
+    if [[ "$IS_ROOT" == "true" ]] && [[ -w "$SYSTEM_BIN" ]]; then
+        ln -sf "$target" "$SYSTEM_BIN/$CMD_NAME"
+        echo "✓ System-wide: $SYSTEM_BIN/$CMD_NAME → $target"
+    fi
+}
+
 # ── Main ───────────────────────────────────────────────────────
 main() {
     local src="${BASH_SOURCE[0]:-}"
@@ -394,6 +433,7 @@ main() {
 
     case "${1:-}" in
         --install)   self_install; exit 0 ;;
+        --update)    self_update; exit 0 ;;
         --uninstall) rm -f "$INSTALL_DIR/$CMD_NAME" "$SYSTEM_BIN/$CMD_NAME"
                      echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"
                      [[ "$IS_ROOT" == "true" ]] && echo "Uninstalled: $SYSTEM_BIN/$CMD_NAME"
