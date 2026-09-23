@@ -118,7 +118,14 @@ do_clean() {
 self_install() {
     mkdir -p "$INSTALL_DIR"
     local target="$INSTALL_DIR/$CMD_NAME"
+    local src="${BASH_SOURCE[0]:-}"
 
+    # If run from a real file (clone workflow), symlink it.
+    # If piped (curl | bash), write the embedded script.
+    if [[ -f "$src" ]]; then
+        ln -sf "$(readlink -f "$src")" "$target"
+        echo "✓ Symlinked: $target → $(readlink -f "$src")"
+    else
     cat <<'INSTALL_SCRIPT' > "$target"
 #!/usr/bin/env bash
 # cache-clear — safe cache cleaner for Hermes Agent (installed via pipe)
@@ -222,9 +229,11 @@ main() {
 }
 main "$@"
 INSTALL_SCRIPT
+        chmod +x "$target"
+        echo "✓ Installed: $target"
+    fi
 
-    chmod +x "$target"
-    echo "✓ Installed: $target"
+    chmod +x "$target" 2>/dev/null || true
 
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) ;;
