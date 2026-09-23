@@ -322,11 +322,14 @@ self_install() {
         chmod +x "$target"
         echo "✓ Symlinked: $target → $(readlink -f "$src")"
     else
-        # Pipe workflow: download the full script from GitHub
+        # Pipe workflow: the full script is being piped to bash right now.
+        # We can't access BASH_SOURCE[0] (it's empty), but we CAN read
+        # the script from stdin if we capture it early, or simply download
+        # from GitHub. Use curl/wget to fetch the latest version.
         if command -v curl >/dev/null 2>&1; then
-            curl -sL https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear -o "$target"
+            curl -fsSL "https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear" -o "$target"
         elif command -v wget >/dev/null 2>&1; then
-            wget -qO "$target" https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear
+            wget -qO "$target" "https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear"
         else
             echo "Error: need curl or wget to install from pipe." >&2
             return 1
