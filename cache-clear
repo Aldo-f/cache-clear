@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# cache-clear — safe cache cleaner for Hermes Agent
+# cache-clear — safe cross-user cache cleaner
+#
+# Goal: Clear stale temporary data from common cache locations across
+#       any Linux system without risking active sessions or expensive-to-
+#       rebuild caches. Includes a safe swap dance on low-memory systems
+#       to prevent OOM when purging large caches.
 #
 # Install:  curl -sL https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear | bash
 # Usage:    cache-clear [--dry-run|--force|--uninstall|--help]
 #
-# Clears stale temp data from ~/.hermes/cache while preserving
-# expensive-to-rebuild JSON caches and active session files.
+# When run as root, system-level caches are also cleaned.
 
 set -euo pipefail
 
@@ -13,232 +17,323 @@ CACHE_ROOT="${HERMES_HOME:-$HOME/.hermes}/cache"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HOME/.local/bin}"
 CMD_NAME="cache-clear"
 LOG_FILE="${CACHE_ROOT}/clean.log"
-
-SAFE_DIRS=(
-    scratch/terminal-output scratch/node-compile-cache
-    scratch/hermes-dm-* scratch/hermes_kernel_*
-    scratch/org.chromium.Chromium.* scratch/agent-browser-*
-    scratch/page*.html scratch/hermes-snap-*.sh
-    scratch/hermes-pty-active-*.json scratch/.last_prune
-    terminal-output exec web documents delegation
-    browser-use blocked-scripts screenshots images videos audio vision spillover
-)
+IS_ROOT=false
+[[ "${EUID:-$(id -u)}" -eq 0 ]] && IS_ROOT=true
 
 DRY_RUN=false
 FORCE=false
 
+# ── Cache targets ─────────────────────────────────────────────
+# User-level temp caches (no sudo needed)
+USER_CACHES=(
+    # Hermes Agent
+    "$HOME/.hermes/cache/scratch/terminal-output"
+    "$HOME/.hermes/cache/scratch/node-compile-cache"
+    "$HOME/.hermes/cache/scratch/hermes-dm-"*
+    "$HOME/.hermes/cache/scratch/hermes_kernel_"*
+    "$HOME/.hermes/cache/scratch/org.chromium.Chromium."*
+    "$HOME/.hermes/cache/scratch/agent-browser-"*
+    "$HOME/.hermes/cache/scratch/page"*.html
+    "$HOME/.hermes/cache/scratch/hermes-snap-"*.sh
+    "$HOME/.hermes/cache/scratch/hermes-pty-active-"*.json
+    "$HOME/.hermes/cache/scratch/.last_prune"
+    "$HOME/.hermes/cache/terminal-output"
+    "$HOME/.hermes/cache/exec"
+    "$HOME/.hermes/cache/web"
+    "$HOME/.hermes/cache/documents"
+    "$HOME/.hermes/cache/delegation"
+    "$HOME/.hermes/cache/browser-use"
+    "$HOME/.hermes/cache/blocked-scripts"
+    "$HOME/.hermes/cache/screenshots"
+    "$HOME/.hermes/cache/images"
+    "$HOME/.hermes/cache/videos"
+    "$HOME/.hermes/cache/audio"
+    "$HOME/.hermes/cache/vision"
+    "$HOME/.hermes/cache/spillover"
+    # Package managers
+    "$HOME/.npm"
+    "$HOME/.cache/yarn"
+    "$HOME/.cache/pip"
+    "$HOME/.cache/uv"
+    # Browsers
+    "$HOME/.cache/mozilla/firefox/"*"/cache2"
+    "$HOME/.cache/mozilla/firefox/"*"/offline-cache"
+    "$HOME/.cache/chromium/Default/Cache"
+    "$HOME/.cache/chromium/Default/Code Cache"
+    "$HOME/.cache/google-chrome/Default/Cache"
+    "$HOME/.cache/google-chrome/Default/Code Cache"
+)
+
+# System-level caches (require root or sudo)
+SYS_CACHES=(
+    /var/cache/apt/archives/*.deb
+    /var/cache/pacman/pkg/*.pkg.*
+    /var/cache/dnf/*/*.rpm
+    /var/cache/yum/*/*/packages/*.rpm
+    /var/cache/zypp/packages/*/*/*.rpm
+)
+
+# ── Helpers ────────────────────────────────────────────────────
 log() {
     local msg="[ $(date '+%Y-%m-%d %H:%M:%S') ] $*"
     echo "$msg"
-    mkdir -p "$CACHE_ROOT" 2>/dev/null || true
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 get_size() { du -sh "$1" 2>/dev/null | cut -f1; }
 
-show_help() {
-    cat <<EOF
-cache-clear — safe Hermes cache cleaner
-
-Usage:
-  $CMD_NAME              Interactive (preview, then confirm)
-  $CMD_NAME --dry-run    Preview only, delete nothing
-  $CMD_NAME --force      Delete without confirmation
-  $CMD_NAME --uninstall  Remove this command
-  $CMD_NAME --help       Show this help
-
-Clears stale temp from: $CACHE_ROOT
-Preserves: root-level JSON caches, active sessions, clean.log
-EOF
+to_bytes() {
+    local val="${1:-0}"
+    case "$val" in
+        *T) awk "BEGIN{printf \"%.0f\", ${val%T}*1099511627776}" ;;
+        *G) awk "BEGIN{printf \"%.0f\", ${val%G}*1073741824}" ;;
+        *M) awk "BEGIN{printf \"%.0f\", ${val%M}*1048576}" ;;
+        *K) awk "BEGIN{printf \"%.0f\", ${val%K}*1024}" ;;
+        *)  echo "${val:-0}" ;;
+    esac
 }
 
-do_clean() {
-    mkdir -p "$CACHE_ROOT"
-    cd "$CACHE_ROOT"
+# Run a command as root if needed (use sudo when not root, direct when root)
+as_root() {
+    if [[ "$IS_ROOT" == "true" ]]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
 
-    local total_before
-    total_before=$(du -sh . 2>/dev/null | cut -f1)
+# ── Safe swap dance ───────────────────────────────────────────
+swap_dance() {
+    local total_reclaim_bytes="${1:-0}"
 
-    log "=== Cache clear started ==="
-    log "Cache root: $CACHE_ROOT"
-    log "Size before: $total_before"
-    log "Mode: $([[ "$DRY_RUN" == "true" ]] && echo "DRY RUN" || echo "DELETE")"
-
-    local targets=()
-    for pattern in "${SAFE_DIRS[@]}"; do
-        for match in $pattern; do
-            [[ -e "$match" ]] && targets+=("$match")
-        done
-    done
-
-    if [[ ${#targets[@]} -eq 0 ]]; then
-        log "Nothing to clean — cache is already empty."
+    # Only trigger if reclaiming > 1 GB
+    local threshold=1073741824
+    if [[ "$total_reclaim_bytes" -lt "$threshold" ]]; then
+        log "Total reclaimable < 1 GB — skip swap dance."
         return 0
     fi
 
-    log "Targets (${#targets[@]}):"
-    for t in "${targets[@]}"; do
-        local sz
-        sz=$(get_size "$t")
-        log "  $sz  $t"
+    log "Reclaiming > 1 GB — running safe swap dance to prevent OOM..."
+
+    # Check for zram0
+    [[ -b /dev/zram0 ]] || { log "No zram0 — skipping swap dance."; return 0; }
+
+    # Check /tmp free space (need ~4 GB)
+    local tmp_free
+    tmp_free=$(df -B1 /tmp 2>/dev/null | awk 'NR==2{print $4}')
+    local need=4294967296
+    if [[ -z "$tmp_free" || "$tmp_free" -lt "$need" ]]; then
+        log "/tmp too small for 4 GB swap file — skipping swap dance."
+        return 0
+    fi
+
+    log "Creating 4 GB temp swap file..."
+    if ! as_root fallocate -l 4G /tmp/.cache-clear-swap 2>/dev/null; then
+        log "fallocate failed — falling back to dd..."
+        if ! as_root dd if=/dev/zero of=/tmp/.cache-clear-swap bs=1M count=4096 status=none 2>/dev/null; then
+            log "Cannot create swap file — aborting swap dance."
+            return 1
+        fi
+    fi
+    as_root chmod 600 /tmp/.cache-clear-swap
+    as_root mkswap /tmp/.cache-clear-swap
+
+    log "Swapping in temp file, cycling zram0..."
+    as_root swapon /tmp/.cache-clear-swap
+    as_root swapoff /dev/zram0
+    as_root swapon /dev/zram0
+    as_root swapoff /tmp/.cache-clear-swap
+    as_root rm -f /tmp/.cache-clear-swap
+
+    log "Swap dance complete."
+    swapon --show 2>/dev/null | sed 's/^/  /' || true
+    free -h 2>/dev/null | grep -E '^(Swap|Mem)' | sed 's/^/  /'
+}
+
+# ── Help ───────────────────────────────────────────────────────
+show_help() {
+    cat <<EOF
+cache-clear — safe cross-user cache cleaner
+
+Usage:
+  cache-clear              Interactive (preview, then confirm — default Y)
+  cache-clear --dry-run    Preview only, delete nothing
+  cache-clear --force      Delete without confirmation
+  cache-clear --uninstall  Remove this command
+  cache-clear --help       Show this help
+
+Clears (user-level, no root needed):
+  ~/.hermes/cache/  (all temp dirs)
+  ~/.npm, ~/.cache/pip, ~/.cache/uv, ~/.cache/yarn
+  Browser caches (Chromium, Firefox)
+
+Clears additionally when run as root (or with sudo):
+  /var/cache/apt/archives/* (Debian/Ubuntu)
+  /var/cache/pacman/pkg/* (Arch)
+  /var/cache/dnf/* (Fedora)
+  systemd journal (vacuum to 50 MB)
+  /tmp stale files
+
+Preserves: root-level JSON caches, active sessions, clean.log
+Safe mode: swap dance on low-memory systems before large deletes
+EOF
+}
+
+# ── Clean ──────────────────────────────────────────────────────
+do_clean() {
+    mkdir -p "$CACHE_ROOT" 2>/dev/null || true
+
+    local total_reclaim=0
+    local all_targets=()
+    local sys_targets=()
+
+    log "=== Cache clear started ==="
+    log "Mode: $([[ "$DRY_RUN" == "true" ]] && echo "DRY RUN" || echo "DELETE")"
+    [[ "$IS_ROOT" == "true" ]] && log "Running as root — system caches included."
+
+    # Gather user-level targets
+    for pattern in "${USER_CACHES[@]}"; do
+        for match in $pattern; do
+            if [[ -e "$match" ]]; then
+                local sz
+                sz=$(get_size "$match")
+                all_targets+=("$match")
+                local bytes
+                bytes=$(to_bytes "$sz")
+                total_reclaim=$((total_reclaim + bytes))
+            fi
+        done
     done
+
+    # Gather system-level targets (only if root or sudo available)
+    if [[ "$IS_ROOT" == "true" ]] || command -v sudo >/dev/null 2>&1; then
+        for pattern in "${SYS_CACHES[@]}"; do
+            for match in $pattern; do
+                if [[ -e "$match" ]]; then
+                    local sz
+                    sz=$(get_size "$match")
+                    sys_targets+=("$match")
+                    local bytes
+                    bytes=$(to_bytes "$sz")
+                    total_reclaim=$((total_reclaim + bytes))
+                fi
+            done
+        done
+    fi
+
+    if [[ ${#all_targets[@]} -eq 0 && ${#sys_targets[@]} -eq 0 ]]; then
+        log "Nothing to clean."
+        return 0
+    fi
+
+    # Show what will be cleaned
+    echo ""
+    if [[ ${#all_targets[@]} -gt 0 ]]; then
+        echo "User caches:"
+        for t in "${all_targets[@]}"; do
+            printf "  %6s  %s\n" "$(get_size "$t")" "$t"
+        done
+    fi
+    if [[ ${#sys_targets[@]} -gt 0 ]]; then
+        echo ""
+        echo "System caches:"
+        for t in "${sys_targets[@]}"; do
+            printf "  %6s  %s\n" "$(get_size "$t")" "$t"
+        done
+    fi
+    echo ""
+    echo "Estimated reclaim: $(numfmt --to=iec "$total_reclaim" 2>/dev/null || echo "${total_reclaim} bytes")"
+    log "User targets: ${#all_targets[@]}, System targets: ${#sys_targets[@]}"
+    log "Estimated reclaim: $(numfmt --to=iec "$total_reclaim" 2>/dev/null || echo "${total_reclaim} bytes")"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log "=== DRY RUN — nothing deleted ==="
         return 0
     fi
 
+    # Confirm (default Y)
     if [[ "$FORCE" != "true" ]]; then
-        echo ""
-        read -rp "Delete the above? [y/N] " answer
+        read -rp "Do you wish to clear cache? [Y/n] " answer
+        answer="${answer:-Y}"
         case "$answer" in
-            [yY][eE][sS]|[yY]) ;;
+            [yY][eE][sS]|[yY]|Y) ;;
+            [nN][oO]|[nN]) log "Cancelled."; return 0 ;;
             *) log "Cancelled."; return 0 ;;
         esac
     fi
 
-    for t in "${targets[@]}"; do
-        rm -rf "$t"
-        log "  deleted: $t"
+    # Safe swap dance before large deletions
+    swap_dance "$total_reclaim"
+
+    # Delete user-level targets
+    for t in "${all_targets[@]}"; do
+        if rm -rf "$t" 2>/dev/null; then
+            log "  deleted: $t"
+        else
+            log "  skip (permission denied): $t"
+        fi
     done
 
-    find . -maxdepth 1 -name '*.tmp' -delete 2>/dev/null || true
+    # Remove stale .tmp at hermes root
+    find "$CACHE_ROOT" -maxdepth 1 -name '*.tmp' -delete 2>/dev/null || true
 
-    local total_after
-    total_after=$(du -sh . 2>/dev/null | cut -f1)
-    log "Size after: $total_after"
+    # Delete system-level targets
+    for t in "${sys_targets[@]}"; do
+        if as_root rm -rf "$t" 2>/dev/null; then
+            log "  deleted: $t"
+        else
+            log "  skip (permission denied): $t"
+        fi
+    done
+
+    # Compact systemd journal
+    if command -v journalctl >/dev/null 2>&1; then
+        as_root journalctl --vacuum-size=50M 2>/dev/null || true
+    fi
+
+    # Clean APT cache if available
+    if command -v apt-get >/dev/null 2>&1; then
+        as_root apt-get clean 2>/dev/null || true
+    fi
+
+    # Clean pacman cache if available (keep last 1 version)
+    if command -v paccache >/dev/null 2>&1; then
+        as_root paccache -rk1 2>/dev/null || true
+    fi
+
+    local total_after=0
+    total_after=$(du -sh "$CACHE_ROOT" 2>/dev/null | cut -f1)
+    log "Hermes cache after: $total_after"
     log "=== Cache clear complete ==="
     echo ""
-    echo "Before: $total_before  →  After: $total_after"
+    echo "Reclaimed ~$(numfmt --to=iec "$total_reclaim" 2>/dev/null || echo "${total_reclaim} bytes")"
 }
 
-# ── Self-install when piped to bash ─────────────────────────────
-# Uses a quoted heredoc so nothing inside is expanded — the embedded
-# script is written verbatim to ~/.local/bin/cache-clear.
+# ── Self-install when piped to bash ────────────────────────────
 self_install() {
     mkdir -p "$INSTALL_DIR"
     local target="$INSTALL_DIR/$CMD_NAME"
     local src="${BASH_SOURCE[0]:-}"
 
-    # If run from a real file (clone workflow), symlink it.
-    # If piped (curl | bash), write the embedded script.
     if [[ -f "$src" ]]; then
+        # Clone workflow: symlink to the real file
         ln -sf "$(readlink -f "$src")" "$target"
+        chmod +x "$target"
         echo "✓ Symlinked: $target → $(readlink -f "$src")"
     else
-    cat <<'INSTALL_SCRIPT' > "$target"
-#!/usr/bin/env bash
-# cache-clear — safe cache cleaner for Hermes Agent (installed via pipe)
-set -euo pipefail
-
-CACHE_ROOT="${HERMES_HOME:-$HOME/.hermes}/cache"
-INSTALL_DIR="${HERMES_INSTALL_DIR:-$HOME/.local/bin}"
-CMD_NAME="cache-clear"
-LOG_FILE="${CACHE_ROOT}/clean.log"
-
-SAFE_DIRS=(
-    scratch/terminal-output scratch/node-compile-cache
-    scratch/hermes-dm-* scratch/hermes_kernel_*
-    scratch/org.chromium.Chromium.* scratch/agent-browser-*
-    scratch/page*.html scratch/hermes-snap-*.sh
-    scratch/hermes-pty-active-*.json scratch/.last_prune
-    terminal-output exec web documents delegation
-    browser-use blocked-scripts screenshots images videos audio vision spillover
-)
-
-DRY_RUN=false
-FORCE=false
-
-log() {
-    local msg="[ $(date '+%Y-%m-%d %H:%M:%S') ] $*"
-    echo "$msg"
-    mkdir -p "$CACHE_ROOT" 2>/dev/null || true
-    echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
-}
-get_size() { du -sh "$1" 2>/dev/null | cut -f1; }
-
-show_help() {
-    cat <<EOF
-cache-clear — safe Hermes cache cleaner
-
-Usage:
-  $CMD_NAME              Interactive (preview, then confirm)
-  $CMD_NAME --dry-run    Preview only, delete nothing
-  $CMD_NAME --force      Delete without confirmation
-  $CMD_NAME --uninstall  Remove this command
-  $CMD_NAME --help       Show this help
-
-Clears stale temp from: $CACHE_ROOT
-Preserves: root-level JSON caches, active sessions, clean.log
-EOF
-}
-
-do_clean() {
-    mkdir -p "$CACHE_ROOT"; cd "$CACHE_ROOT"
-    local total_before; total_before=$(du -sh . 2>/dev/null | cut -f1)
-    log "=== Cache clear started ==="
-    log "Cache root: $CACHE_ROOT"
-    log "Size before: $total_before"
-    log "Mode: $([[ "$DRY_RUN" == "true" ]] && echo "DRY RUN" || echo "DELETE")"
-    local targets=()
-    for pattern in "${SAFE_DIRS[@]}"; do
-        for match in $pattern; do
-            [[ -e "$match" ]] && targets+=("$match")
-        done
-    done
-    if [[ ${#targets[@]} -eq 0 ]]; then
-        log "Nothing to clean — cache is already empty."; return 0
-    fi
-    log "Targets (${#targets[@]}):"
-    for t in "${targets[@]}"; do
-        local sz; sz=$(get_size "$t"); log "  $sz  $t"
-    done
-    if [[ "$DRY_RUN" == "true" ]]; then
-        log "=== DRY RUN — nothing deleted ==="; return 0
-    fi
-    if [[ "$FORCE" != "true" ]]; then
-        echo ""
-        read -rp "Delete the above? [y/N] " answer
-        case "$answer" in
-            [yY][eE][sS]|[yY]) ;;
-            *) log "Cancelled."; return 0 ;;
-        esac
-    fi
-    for t in "${targets[@]}"; do
-        rm -rf "$t"; log "  deleted: $t"
-    done
-    find . -maxdepth 1 -name '*.tmp' -delete 2>/dev/null || true
-    local total_after; total_after=$(du -sh . 2>/dev/null | cut -f1)
-    log "Size after: $total_after"
-    log "=== Cache clear complete ==="
-    echo ""; echo "Before: $total_before  →  After: $total_after"
-}
-
-main() {
-    # Self-install when piped to bash (no backing script file).
-    local src="${BASH_SOURCE[0]:-}"
-    if [[ ! -f "$src" ]]; then
-        self_install
-        exit 0
-    fi
-
-    case "${1:-}" in
-        --install)   self_install; exit 0 ;;
-        --uninstall) rm -f "$INSTALL_DIR/$CMD_NAME"; echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"; exit 0 ;;
-        --help|-h)  show_help; exit 0 ;;
-        --dry-run)   DRY_RUN=true ;;
-        --force)     FORCE=true ;;
-    esac
-
-    do_clean
-}
-main "$@"
-INSTALL_SCRIPT
+        # Pipe workflow: download the full script from GitHub
+        if command -v curl >/dev/null 2>&1; then
+            curl -sL https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear -o "$target"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "$target" https://raw.githubusercontent.com/Aldo-f/cache-clear/main/cache-clear
+        else
+            echo "Error: need curl or wget to install from pipe." >&2
+            return 1
+        fi
         chmod +x "$target"
         echo "✓ Installed: $target"
     fi
-
-    chmod +x "$target" 2>/dev/null || true
 
     case ":$PATH:" in
         *":$INSTALL_DIR:"*) ;;
@@ -247,19 +342,15 @@ INSTALL_SCRIPT
             echo "⚠ $INSTALL_DIR is not on your PATH."
             echo "  bash:  export PATH=\"$INSTALL_DIR:\$PATH\""
             echo "  fish:  fish_add_path $INSTALL_DIR"
-            echo ""
             ;;
     esac
-
     echo "Run \`$CMD_NAME --help\` for usage."
 }
 
 # ── Main ───────────────────────────────────────────────────────
 main() {
-    # Self-install when piped to bash (no backing script file).
-    # When run via `curl | bash`, BASH_SOURCE[0] is empty or doesn't
-    # point to a real file on disk.
     local src="${BASH_SOURCE[0]:-}"
+    # Self-install when piped to bash (no backing script file)
     if [[ ! -f "$src" ]]; then
         self_install
         exit 0
@@ -268,9 +359,11 @@ main() {
     case "${1:-}" in
         --install)   self_install; exit 0 ;;
         --uninstall) rm -f "$INSTALL_DIR/$CMD_NAME"; echo "Uninstalled: $INSTALL_DIR/$CMD_NAME"; exit 0 ;;
-        --help|-h)  show_help; exit 0 ;;
+        --help|-h)   show_help; exit 0 ;;
         --dry-run)   DRY_RUN=true ;;
         --force)     FORCE=true ;;
+        "")          ;; # Interactive with default Y
+        *)           echo "Unknown option: $1"; show_help; exit 1 ;;
     esac
 
     do_clean
